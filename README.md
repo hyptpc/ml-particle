@@ -12,12 +12,12 @@ $ pip install torch
 
 ### 1. Create train data & test data
 
-Go to "Settings", and "SSH and GPG keys".
 ```sh
 $ root mkrootfile.C
 ```
  and you can create data by Monte-Carlo
 resolution (tof:0ps, 10ps, 100ps, 500ps / ene:0%, 1%, 10%, 30%) will be added by gaussian and saved to rootfile branches indivisually. 
+
 
 ### 2. Start learning
 
