@@ -4,7 +4,7 @@ Machine Learning for Particle Identification
 
 # How to use  
 ### 0. Evironment settings
-install uproot3 and torch, if you haven't yet.
+Install uproot3 and torch, if you haven't yet.
 ```sh
 $ pip install uproot3
 $ pip install torch
@@ -34,7 +34,7 @@ After the learning process finishes, the input particle_id and output particle_i
 $ python3 normalized_confusion_matrix.py 10 30
 ```
 
-Get the confusion matrix figure, and you can know the accuracy for each particle 
+Get the confusion matrix, and you can know the accuracy for each particle 
   
  
 
