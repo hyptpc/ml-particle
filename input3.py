@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+
+from tqdm import tqdm
+import time
+import matplotlib.pyplot as plt
+import numpy as np
+import uproot3
+from torch.utils.data import DataLoader, Dataset
+import torch.optim as optim
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+import os
+import sys
+
+
+start_time = time.time()
+n_epoch = 200
+num_workers = 8
+
+# コマンドライン引数からTOFとエネルギーの分解能を取得
+if len(sys.argv) != 3:
+    print("Usage: python3 input3.py <tof_resolution> <energy_resolution>")
+    sys.exit(1)
+
+tof_option = int(sys.argv[1])  # TOFの分解能
+energy_loss_option = int(sys.argv[2])  # エネルギーの分解能
+
+# # データセットの定義
+
+
+class CustomRootDataset(Dataset):
+    def __init__(self, root_file_path):
+        self.root_file_path = root_file_path
+        self._load_data()
+
+    def _load_data(self):
+        self.root_file = uproot3.open(self.root_file_path)
+        self.tree = self.root_file["tree"]
+        self.n_entries = len(self.tree)
+
+        # データの事前読み込み
+        self.data = []
+        with tqdm(total=self.n_entries, desc="Loading data", unit="entry") as pbar:
+            for idx in range(self.n_entries):
+                entry = self.tree
+                particle = entry["particle"].array()[idx]
+                mom = entry["mom"].array()[idx]
+                tof = entry[f"tofres{tof_option}"].array()[idx]
+                energy = entry[f"energy_lossres{energy_loss_option}"].array()[idx]
+
+                # Convert to PyTorch tensors
+                particle = torch.tensor(particle, dtype=torch.long)
+                mom = torch.tensor(mom, dtype=torch.float32)
+                tof = torch.tensor(tof, dtype=torch.float32)
+                energy = torch.tensor(energy, dtype=torch.float32)
+                mom = mom.unsqueeze(0)
+                tof = tof.unsqueeze(0)
+                energy = energy.unsqueeze(0)
+                self.data.append(
+                    {"input": torch.cat((mom, tof, energy), dim=0), "target": particle}
+                )
+                pbar.update(1)
+
+    def __len__(self):
+        return self.n_entries
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
+# 訓練用データセットとデータローダの設定
+train_root_file_path = "/home/had/kohki/work/ML/Likelihood/buf/train_10000.root"
+# train_root_file_path = "/home/had/kohki/work/ML/Likelihood/buf/train.root"
+train_dataset = CustomRootDataset(train_root_file_path)
+train_loader = DataLoader(
+    train_dataset, batch_size=256, shuffle=True, num_workers=num_workers
+)
+
+# テスト用データセットの設定
+test_root_file_path = "/home/had/kohki/work/ML/Likelihood/buf/test_10000.root"
+# test_root_file_path = "/home/had/kohki/work/ML/Likelihood/buf/test.root"
+test_dataset = CustomRootDataset(test_root_file_path)
+test_loader = DataLoader(
+    test_dataset, batch_size=256, shuffle=True, num_workers=num_workers
+)
+
+# モデルの定義
+
+
+class ExampleNN(nn.Module):
+    def __init__(self, input_size, hidden1_size, hidden2_size, output_size):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden1_size)
+        self.fc2 = nn.Linear(hidden1_size, hidden2_size)
+        self.fc3 = nn.Linear(hidden2_size, output_size)
+
+    def forward(self, x):
+        z1 = F.relu(self.fc1(x))
+        z2 = F.relu(self.fc2(z1))
+        return self.fc3(z2)
+
+
+# モデルの再定義と初期化
+input_size = 3
+hidden1_size = 1024
+hidden2_size = 512
+output_size = 3
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = ExampleNN(input_size, hidden1_size, hidden2_size, output_size).to(device)
+
+print("*********************************")
+print("number of CPU core: ", os.cpu_count())
+print(f"now using {num_workers} core")
+print("---------------------------------")
+if torch.cuda.is_available():
+    n_gpu = torch.cuda.device_count()
+    print("number of GPU available: ", n_gpu)  # gpuの使用可能数を取得
+    print("current gpu: ", torch.cuda.get_device_name(torch.cuda.current_device()))
+    if n_gpu > 1:
+        model = nn.DataParallel(model)
+else:
+    print("no gpu available")
+print("*********************************")
+
+model = model.to(device)
+# 損失関数とオプティマイザの定義
+loss_function = nn.CrossEntropyLoss()
+# optimizer = optim.SGD(model.parameters(), lr=0.01)
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+""" training function """
+
+
+def train_model(model, train_loader, loss_function, optimizer, device="cpu"):
+    train_loss = 0.0
+    num_train = 0
+    train_accuracy = 0.0
+    model.train()  # train mode
+    # iはバッチindex(0~39(=[10000/256])), batchは要素
+    for i, batch in enumerate(train_loader):
+        num_train += len(batch["target"])  # count batch number
+        inputs, labels = batch["input"].to(device), batch["target"].to(device)
+        particle = batch["target"].cpu().numpy()
+        optimizer.zero_grad()  # initialize grad
+        # 1 forward
+        outputs = model(inputs)
+        # 2 calculate loss
+        loss = loss_function(outputs, labels)
+        # 3 calculate grad
+        loss.backward()
+        # 4 update parameters
+        optimizer.step()
+        particle_ML = torch.argmax(outputs, dim=1).cpu().numpy()
+        train_loss += loss.item()
+        for j in range(len(labels)):
+            if particle[j] == particle_ML[j]:
+                prediction = 1
+            else:
+                prediction = 0
+            train_accuracy += prediction
+    train_loss = train_loss / len(train_loader)
+    train_accuracy = train_accuracy / num_train
+    return train_loss, train_accuracy
+
+
+""" test function """
+
+
+def test_model(model, test_loader, loss_function, device="cpu"):
+    test_loss = 0.0
+    test_accuracy = 0.0
+    num_test = 0
+    model.eval()  # eval mode
+    with torch.no_grad():  # invalidate grad
+        for i, batch in enumerate(test_loader):
+            num_test += len(batch["target"])
+            inputs, labels = batch["input"].to(device), batch["target"].to(device)
+            outputs = model(inputs)
+            loss = loss_function(outputs, labels)
+            test_loss += loss.item()
+            particle = batch["target"].cpu().numpy()
+            particle_ML = torch.argmax(outputs, dim=1).cpu().numpy()
+
+            for j in range(len(labels)):
+                if particle[j] == particle_ML[j]:
+                    prediction = 1
+                else:
+                    prediction = 0
+                test_accuracy += prediction
+        test_loss = test_loss / len(test_loader)
+        test_accuracy = test_accuracy / num_test
+    return test_loss, test_accuracy
+
+
+""" leaning function """
+
+checkpoint_path = (
+    f"/home/had/kohki/work/ML/learn/pth/tof{tof_option}_ene{energy_loss_option}.pth"
+)
+
+
+def learning(
+    model, train_loader, test_loader, loss_function, optimizer, n_epoch, device="cpu"
+):
+    train_loss_list = []
+    test_loss_list = []
+    train_accuracy_list = []
+    test_accuracy_list = []
+    epoch_list = []
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_epoch = checkpoint["epoch"] + 1  # 学習を前回のエポックから再開
+        train_loss_list = checkpoint["train_loss"]
+        test_loss_list = checkpoint["test_loss"]
+        train_accuracy_list = checkpoint["train_accuracy"]
+        test_accuracy_list = checkpoint["test_accuracy"]
+        epoch_list = checkpoint["epoch_list"]
+        min_loss = checkpoint["min_loss"]
+        print(f"Previous checkpoint loaded. Resuming training from epoch {start_epoch}")
+    else:
+        start_epoch = 1
+        min_loss = float("inf")
+
+    # epoch loop
+    for epoch in range(start_epoch, n_epoch + 1, 1):
+        train_loss, train_accuracy = train_model(
+            model, train_loader, loss_function, optimizer, device=device
+        )
+        test_loss, test_accuracy = test_model(
+            model, test_loader, loss_function, device=device
+        )
+        print(
+            f"epoch : {epoch}, train_loss : {train_loss:.5f}, test_loss : {test_loss:.5f}"
+        )
+        print(
+            f"train_accuracy : {train_accuracy:.5f}, test_accuracy : {test_accuracy:.5f}"
+        )
+        print(
+            "---------------------------------------------------------------------------"
+        )
+        train_loss_list.append(train_loss)
+        test_loss_list.append(test_loss)
+        train_accuracy_list.append(train_accuracy)
+        test_accuracy_list.append(test_accuracy)
+        epoch_list.append(epoch)
+        # ------- pthの保存 -------
+        if test_loss < min_loss:
+            min_loss = test_loss
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "train_loss": train_loss_list,
+                    "test_loss": test_loss_list,
+                    "train_accuracy": train_accuracy_list,
+                    "test_accuracy": test_accuracy_list,
+                    "epoch_list": epoch_list,
+                    "min_loss": min_loss,
+                },
+                checkpoint_path,
+            )
+
+    # ----------plot figures----------------------------------------------
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Accuracy")
+    ax1.set_title(
+        f"Accuracy at each epoch (resolutions: {tof_option}ns ToF, {energy_loss_option} % Energy Loss)"
+    )
+    ax1.plot(train_accuracy_list, c="black", label="train", linestyle="--")
+    ax1.plot(test_accuracy_list, c="red", label="test", linestyle="-")
+    ax1.grid(True)
+    ax1.set_ylim(0, 1)
+    ax1.legend(loc="lower right")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Loss")
+    ax2.set_title(
+        f"Loss Function at each epoch (resolutions: {tof_option}ns ToF, {energy_loss_option} %% Energy Loss)"
+    )
+    ax2.plot(train_loss_list, c="black", label="train", linestyle="--")
+    ax2.plot(test_loss_list, c="red", label="test", linestyle="-")
+    ax2.grid(True)
+    ax2.set_ylim(0, max(test_loss_list) * 1.1)
+    ax2.legend(loc="upper right")
+    plt.tight_layout()
+    plt.savefig(
+        f"/home/had/kohki/work/ML/learn/figures/input3/tof{tof_option}_ene{energy_loss_option}.png"
+    )
+
+    return train_loss_list, test_loss_list, train_accuracy_list, test_accuracy_list
+
+
+def format_time(seconds):
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+
+
+""" learning """
+train_loss_list, test_loss_list, train_accuracy_list, test_accuracy_list = learning(
+    model, train_loader, test_loader, loss_function, optimizer, n_epoch, device=device
+)
+
+print("learning process all finished! filling data to ROOT file...")
+
+""" fill data at minimum loss function to ROOT file"""
+checkpoint = torch.load(checkpoint_path)
+model.load_state_dict(checkpoint["model"])
+test_loss = 0.0
+num_test = 0
+write_mom = []
+write_tof = []
+write_ene = []
+write_particle = []
+write_particle_ML = []
+test_accuracy = 0
+for i, batch in enumerate(test_loader):
+    num_test += len(batch["target"])
+    inputs, labels = batch["input"].to(device), batch["target"].to(device)
+    particle_ = labels.cpu().numpy()
+    outputs = model(inputs)
+    particle_ML = torch.argmax(outputs, dim=1).cpu().numpy()
+    for j in range(len(labels)):
+        mom = inputs[j, 0]
+        write_mom.append(mom.cpu().numpy())
+        tof = inputs[j, 1]
+        write_tof.append(tof.cpu().numpy())
+        ene = inputs[j, 2]
+        write_ene.append(ene.cpu().numpy())
+        particle = particle_[j]
+        write_particle.append(particle)
+        write_particle_ML.append(particle_ML[j])
+
+file = uproot3.recreate(
+    f"/home/had/kohki/work/ML/create_rootfiles/output_digits_tof{tof_option}_ene{energy_loss_option}.root"
+)
+file["tree"] = uproot3.newtree(
+    {
+        "mom": np.float32,
+        "tof": np.float32,
+        "ene": np.float32,
+        "particle": np.int32,
+        "particle_ML": np.int32,
+    }
+)
+
+file["tree"].extend(
+    {
+        "mom": write_mom,
+        "tof": write_tof,
+        "ene": write_ene,
+        "particle": write_particle,
+        "particle_ML": write_particle_ML,
+    }
+)
+print(
+    f"Epoch with minimum loss function: {checkpoint['epoch']} loss: {checkpoint['min_loss']}"
+)
+end_time = time.time()
+total_time = end_time - start_time  # エポック処理時間を計算
+print(f"All finished! processing time  {format_time(total_time)}")
+plt.show()
