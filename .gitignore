@@ -1,0 +1,8 @@
+__pycache__
+*.root
+*.pth
+*.cp
+*.png
+.DS_Store
+\#*
+*~
