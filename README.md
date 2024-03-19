@@ -10,6 +10,34 @@ $ pip install uproot3
 $ pip install torch
 ```
 
+#### 0.1 Directory
+```
+ML
+│
+├ README.md .
+│
+├ create_rootfiles .. creating datas as rootfile and saving rootfiles
+│　├ dataplot.C ... plotting train/test data 
+│　└ mkrootfile.C ... creating train/test data
+│
+├ learn ... codes for machine learning
+│　├ code
+│　│  ├ normalized_confusion_matrix.py 
+│　│  └ input3.py
+│　├ figures ... saving plot images here
+│　└ pth ... saving pth file here
+│
+└ Likelihood ... code for likelihood
+   ├ ana
+　 │  ├ Likelihood.C
+   │  ├ draw_pdf.C
+　 │  └ compare_likelihood.C ... comparing ML and Likelihood  
+　 ├ buf ... saving created rootfiles here (linked to had/group)
+　 └ mkfile ... creating rootfile data for likelihood analysis
+　　  ├ mkrootfile_pdf.C
+　　  └ Job_mkPDF.sh ... creating rootfiles for pdf data pararelly and connect
+```
+
 ### 1. Create train data & test data
 
 ```sh
