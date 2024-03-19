@@ -11,7 +11,7 @@ $ pip install torch
 ```
 
 #### 0.1 Directory structure
-```sh
+```
 ML
 │
 ├ README.md .
