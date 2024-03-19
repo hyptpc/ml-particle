@@ -10,8 +10,8 @@ $ pip install uproot3
 $ pip install torch
 ```
 
-#### 0.1 Directory
-```
+#### 0.1 Directory structure
+```sh
 ML
 │
 ├ README.md .
