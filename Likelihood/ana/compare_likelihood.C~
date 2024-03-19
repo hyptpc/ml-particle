@@ -1,0 +1,189 @@
+// 最終更新日: 2024/02/03
+
+#include <TStyle.h>
+#include <TFile.h>
+#include <TTree.h>
+#include <TH2D.h>
+#include <TCanvas.h>
+#include <iostream>
+#include <TGraph.h>
+
+void compare_likelihood()
+{
+  gStyle->SetOptStat(0);
+  TFile *fin1 = new TFile("/home/had/kohki/work/test_ML/Likelihood/buf/train_Kppi_Tof100Ene30.root");
+  TFile *fin2 = new TFile("/home/had/kohki/work/test_ML/Likelihood/buf/test_Kppi_Tof100Ene30.root");
+  TFile *fin3 = new TFile("../../create_rootfiles/output_digits_ToF100_Energy30.root");
+
+  TTree *t1 = (TTree *)fin1->Get("tree");
+  TTree *t2 = (TTree *)fin2->Get("tree");
+  TTree *t3 = (TTree *)fin3->Get("tree");
+
+  TH2D *hpdf[3][500]; //[3]:particle, [500]:mom
+
+  fin1->ReadAll();
+  for (int i = 0; i < 3; ++i)
+  {
+    for (int j = 0; j < 500; ++j)
+    {
+      hpdf[i][j] = (TH2D *)fin1->FindObject(Form("hpdf%d_%d", i, j));
+      double Norm_factor = 1. / hpdf[i][j]->GetEntries();
+      hpdf[i][j]->Scale(Norm_factor);
+    }
+  }
+
+  Int_t particle, particle_ML;
+  double mom;
+  double tof, tofres10, tofres100, tofres500, tofres1000; // tof of 40cm distance
+  double energy_lossres30;
+
+  t2->SetBranchAddress("particle", &particle);
+  t2->SetBranchAddress("mom", &mom);
+  t2->SetBranchAddress("tofres100", &tofres100);
+  t2->SetBranchAddress("energy_lossres30", &energy_lossres30);
+
+  int ev_max = t2->GetEntries();
+
+  TH1D *h_Likeli_S[3];
+  TH1D *h_Likeli_B[3];
+  for (int ip = 0; ip < 3; ++ip)
+  {
+    h_Likeli_S[ip] = new TH1D(Form("h_Likeli_S%d", ip),
+                              Form("h_Likeli_S%d", ip),
+                              1000, 0, 1);
+    h_Likeli_B[ip] = new TH1D(Form("h_Likeli_B%d", ip),
+                              Form("h_Likeli_B%d", ip),
+                              1000, 0, 1);
+    h_Likeli_B[ip]->SetLineColor(1);
+    h_Likeli_S[ip]->SetLineColor(2);
+  }
+
+  const int numLcut = 100;
+  double L_cut[numLcut];
+  for (int i = 0; i < numLcut; i++)
+  {
+    L_cut[i] = (double)(i + 1) / (double)numLcut;
+  }
+  int N_particle_input[3][numLcut] = {0};
+  int N_particleL_S[3][numLcut] = {0}; // true identification
+  int N_particleL[3][numLcut] = {0};
+
+  double FoM[3][numLcut]; // Figure of Merit (S/S+BG)
+  double Eff[3][numLcut];
+
+  for (int k = 0; k < ev_max; k++)
+  {
+    if (k % 100000 == 0)
+      std::cout << "event:" << k << std::endl;
+
+    t2->GetEntry(k);
+    int mom_id = (int)((mom - 0.3) * 1000.);
+    int p_id = (int)particle;
+    int tof_id = hpdf[0][mom_id]->GetXaxis()->FindBin(tofres100);
+    int Eloss_id = hpdf[0][mom_id]->GetYaxis()->FindBin(energy_lossres30);
+    double pdf[3];
+    double Likeli[3];
+    for (int ip = 0; ip < 3; ++ip)
+    {
+      pdf[ip] = hpdf[ip][mom_id]->GetBinContent(tof_id, Eloss_id);
+      // std::cout<<"pdf("<<ip<<"):"<<pdf[ip]<<std::endl;
+    }
+    double Sum_pdf = pdf[0] + pdf[1] + pdf[2];
+    for (int ip = 0; ip < 3; ++ip)
+    {
+      Likeli[ip] = pdf[ip] / Sum_pdf;
+      if ((int)particle == ip)
+        h_Likeli_S[ip]->Fill(Likeli[ip]);
+      else
+        h_Likeli_B[ip]->Fill(Likeli[ip]);
+    }
+
+    for (int ip = 0; ip < 3; ++ip)
+    {
+      for (int icut = 0; icut < numLcut; ++icut)
+      {
+        if ((int)particle == ip)
+        {
+          ++N_particle_input[ip][icut];
+          if (Likeli[ip] > L_cut[icut])
+            ++N_particleL_S[ip][icut];
+        }
+        if (Likeli[ip] > L_cut[icut])
+          ++N_particleL[ip][icut];
+      }
+    }
+  }
+  for (int ip = 0; ip < 3; ++ip)
+  {
+    for (int icut = 0; icut < numLcut; ++icut)
+    {
+      Eff[ip][icut] = (double)N_particleL_S[ip][icut] / (double)N_particle_input[ip][icut];
+      FoM[ip][icut] = (double)N_particleL_S[ip][icut] / (double)N_particleL[ip][icut];
+    }
+  }
+
+  double EffML[3];
+  double FoMML[3];
+  t3->SetBranchAddress("particle", &particle);
+  t3->SetBranchAddress("particle_ML", &particle_ML);
+  for (int ip = 0; ip < 3; ++ip)
+  {
+    int count_particle = 0, count_particle_ML = 0;
+    int count_match = 0;
+
+    for (int k = 0; k < t3->GetEntries(); k++)
+    {
+      t3->GetEntry(k);
+      if ((int)particle == ip)
+      {
+        count_particle++;
+        if ((int)particle_ML == ip)
+        {
+          count_match++;
+        }
+      }
+      if ((int)particle_ML == ip)
+      {
+        count_particle_ML++;
+      }
+    }
+
+    EffML[ip] = (double)count_match / (double)count_particle;
+    FoMML[ip] = (double)count_match / (double)count_particle_ML;
+  }
+
+
+  /////////////////////////// DRAW GRAPH ///////////////////////////
+  TCanvas *c = new TCanvas("c", "c", 1800, 600);
+  c->Divide(3, 1);
+  TGraph *gEff_SB[3];
+
+  for (int ip = 0; ip < 3; ++ip)
+  {
+    c->cd(ip+1);
+    gEff_SB[ip] = new TGraph(numLcut, Eff[ip], FoM[ip]);
+    if (ip == 0)
+      gEff_SB[ip]->SetTitle("Likelihood vs ML on P");
+    else if (ip == 1)
+      gEff_SB[ip]->SetTitle("Likelihood vs ML on #pi");
+    else if (ip == 2)
+      gEff_SB[ip]->SetTitle("Likelihood vs ML on K");
+    gEff_SB[ip]->SetName(Form("gEff_SB%d", ip));
+    gEff_SB[ip]->GetYaxis()->SetTitle("FoM");
+    gEff_SB[ip]->GetYaxis()->CenterTitle();
+    gEff_SB[ip]->GetXaxis()->SetTitle("Efficiency");
+    gEff_SB[ip]->GetXaxis()->SetTitleSize(0.04);
+    gEff_SB[ip]->GetYaxis()->SetTitleSize(0.04);
+    gEff_SB[ip]->SetMarkerColor(1);
+    gEff_SB[ip]->SetMarkerStyle(7);
+    gEff_SB[ip]->GetXaxis()->SetRangeUser(0.7, 1.01);
+    gEff_SB[ip]->GetYaxis()->SetRangeUser(0.7, 1.01);
+    gEff_SB[ip]->Draw("AP");
+    TGraph *point = new TGraph(1);
+    point->SetPoint(0, EffML[ip], FoMML[ip]);
+    point->SetMarkerStyle(20);
+    point->SetMarkerColor(kRed);
+    point->Draw("P");
+    std::cout << "Eff=" << EffML[ip] << "FoM" << FoMML[ip] << std::end1;
+  }
+}
